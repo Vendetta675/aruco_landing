@@ -130,41 +130,29 @@ class SpiralSearch:
         self.get_next_waypoint()   # set first wp
 
     def get_next_waypoint(self):
-        """Advance to the next spiral waypoint and return (wp_x, wp_y)."""
-        dir_idx   = self.leg_index % 4
-        leg_mult  = (self.leg_index // 2) + 1   # grows every 2 legs
-        step      = self.STEP_M * leg_mult
-
+        dir_idx  = self.leg_index % 4
+        leg_mult = (self.leg_index // 2) + 1
+        step     = self.STEP_M * leg_mult
         dx = self._dirs[dir_idx][0] * step
         dy = self._dirs[dir_idx][1] * step
-
-        self.wp_x = self.origin_x + dx
-        self.wp_y = self.origin_y + dy
-        self.leg_index  += 1
-        self.leg_start   = time.time()
+        self.wp_x += dx
+        self.wp_y += dy
+        self.leg_index += 1
+        self.leg_start = time.time()
         return self.wp_x, self.wp_y
 
     def update(self, drone_x, drone_y):
-        """
-        Call every cycle while active.
-        Returns (target_x, target_y, done) where done=True means
-        max radius exceeded → give up.
-        """
-        if not self.active:
-            return self.origin_x, self.origin_y, False
 
-        # Check radius limit
-        dist_from_origin = math.sqrt(
-            (self.wp_x - self.origin_x)**2 +
-            (self.wp_y - self.origin_y)**2)
-        if dist_from_origin > self.MAX_RADIUS_M:
-            return self.wp_x, self.wp_y, True
-
-        # Advance to next leg when dwell expires
-        if time.time() - self.leg_start > self.LEG_DWELL:
+        dist = math.sqrt(
+        (drone_x - self.wp_x)**2 +
+        (drone_y - self.wp_y)**2)
+        elapsed = time.time() - self.leg_start
+        if dist < 0.15 or elapsed > 4.0:
             self.get_next_waypoint()
-
         return self.wp_x, self.wp_y, False
+        self.sp_x = target_x
+        self.sp_y = target_y
+        self.sp_z = self.spiral.origin_z
 
 
 # =========================================================================== #
@@ -323,9 +311,9 @@ class TakeoffPIDLand(Node):
     def _on_aruco_detected(self, tvec):
         """
         Downward-facing camera → world frame:
-          tvec[0]  cam_x  right=+   maps to world Y
-          tvec[1]  cam_y  fwd=+     maps to world X
-          tvec[2]  cam_z  depth = altitude above marker
+        tvec[0]  cam_x  right=+   maps to world Y
+        tvec[1]  cam_y  fwd=+     maps to world X
+        tvec[2]  cam_z  depth = altitude above marker
 
         Control law
         ───────────
