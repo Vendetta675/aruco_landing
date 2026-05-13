@@ -1,0 +1,170 @@
+<?xml version="1.0" ?>
+<sdf version="1.9">
+  <world name="custom_runway">
+    <physics name="1ms" type="ignore">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system"
+      name="gz::sim::systems::Physics">
+    </plugin>
+    <plugin
+      filename="gz-sim-sensors-system"
+      name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-user-commands-system"
+      name="gz::sim::systems::UserCommands">
+    </plugin>
+    <plugin filename="gz-sim-scene-broadcaster-system"
+      name="gz::sim::systems::SceneBroadcaster">
+    </plugin>
+    <plugin filename="gz-sim-imu-system"
+      name="gz::sim::systems::Imu">
+    </plugin>
+    <plugin filename="gz-sim-navsat-system"
+      name="gz::sim::systems::NavSat">
+    </plugin>
+
+    <scene>
+      <ambient>1.0 1.0 1.0</ambient>
+      <background>0.8 0.8 0.8</background>
+      <sky></sky>
+    </scene>
+
+    <spherical_coordinates>
+      <latitude_deg>-35.363262</latitude_deg>
+      <longitude_deg>149.165237</longitude_deg>
+      <elevation>584</elevation>
+      <heading_deg>0</heading_deg>
+      <surface_model>EARTH_WGS84</surface_model>
+    </spherical_coordinates>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.8 0.8 0.8 1</specular>
+      <attenuation>
+        <range>1000</range>
+        <constant>0.9</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <model name="axes">
+      <static>1</static>
+      <link name="link">
+        <visual name="r">
+          <cast_shadows>0</cast_shadows>
+          <pose>5 0 0.1 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>10 0.01 0.01</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>1 0 0 0.8</ambient>
+            <diffuse>1 0 0 0.8</diffuse>
+            <emissive>1 0 0 0.8</emissive>
+            <specular>0.5 0.5 0.5 0.8</specular>
+          </material>
+        </visual>
+        <visual name="g">
+          <cast_shadows>0</cast_shadows>
+          <pose>0 5 0.1 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.01 10 0.01</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0 1 0 0.8</ambient>
+            <diffuse>0 1 0 0.8</diffuse>
+            <emissive>0 1 0 0.8</emissive>
+            <specular>0.5 0.5 0.5 0.8</specular>
+          </material>
+        </visual>
+        <visual name="b">
+          <cast_shadows>0</cast_shadows>
+          <pose>0 0 5.1 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.01 0.01 10</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0 0 1 0.8</ambient>
+            <diffuse>0 0 1 0.8</diffuse>
+            <emissive>0 0 1 0.8</emissive>
+            <specular>0.5 0.5 0.5 0.8</specular>
+          </material>
+        </visual>
+        <sensor name="navsat_sensor" type="navsat">
+          <always_on>1</always_on>
+          <update_rate>1</update_rate>
+        </sensor>
+      </link>
+    </model>
+    
+    <include>
+      <uri>model://runway</uri>
+      <pose degrees="true">-29 545 0 0 0 363</pose>
+    </include>
+
+    <include>
+      <uri>model://custom_iris</uri>
+      <pose degrees="true">0 0 0.195 0 0 90</pose>
+    </include>
+
+    <include><uri>model://pine_tree</uri><name>pine_tree_1</name><pose>15 10 0 0 0 0</pose></include>
+    <include><uri>model://pine_tree</uri><name>pine_tree_2</name><pose>-12 25 0 0 0 0</pose></include>
+    <include><uri>model://pine_tree</uri><name>pine_tree_3</name><pose>22 -18 0 0 0 0</pose></include>
+    <include><uri>model://oak_tree</uri><name>oak_tree_1</name><pose>-20 -10 0 0 0 0</pose></include>
+    <include><uri>model://oak_tree</uri><name>oak_tree_2</name><pose>30 5 0 0 0 0</pose></include>
+    <include><uri>model://pine_tree</uri><name>rep_shrub_1</name><pose>5 8 0 0 0 0</pose></include>
+    <include><uri>model://pine_tree</uri><name>rep_shrub_2</name><pose>-8 -5 0 0 0 0</pose></include>
+    <include><uri>model://pine_tree</uri><name>rep_shrub_3</name><pose>12 -8 0 0 0 0</pose></include>
+    <include><uri>model://pine_tree</uri><name>rep_shrub_4</name><pose>-5 15 0 0 0 0</pose></include>
+    <include><uri>model://oak_tree</uri><name>rep_boulder_1</name><pose>10 -12 0 0 0 45</pose></include>
+
+    <include><uri>model://pine_tree</uri><name>j_pine_1</name><pose>35 42 0 0 0 15</pose></include>
+    <include><uri>model://pine_tree</uri><name>j_pine_2</name><pose>-40 38 0 0 0 45</pose></include>
+    <include><uri>model://pine_tree</uri><name>j_pine_3</name><pose>48 -25 0 0 0 90</pose></include>
+    <include><uri>model://pine_tree</uri><name>j_pine_4</name><pose>-35 -30 0 0 0 12</pose></include>
+    <include><uri>model://pine_tree</uri><name>j_pine_5</name><pose>60 15 0 0 0 110</pose></include>
+    <include><uri>model://pine_tree</uri><name>j_pine_6</name><pose>-55 20 0 0 0 75</pose></include>
+    <include><uri>model://pine_tree</uri><name>j_pine_7</name><pose>25 -45 0 0 0 25</pose></include>
+    <include><uri>model://pine_tree</uri><name>j_pine_8</name><pose>-45 55 0 0 0 60</pose></include>
+    <include><uri>model://pine_tree</uri><name>j_pine_9</name><pose>50 -55 0 0 0 85</pose></include>
+    <include><uri>model://pine_tree</uri><name>j_pine_10</name><pose>-65 -15 0 0 0 35</pose></include>
+    <include><uri>model://pine_tree</uri><name>j_pine_11</name><pose>70 30 0 0 0 15</pose></include>
+    <include><uri>model://pine_tree</uri><name>j_pine_12</name><pose>-25 65 0 0 0 90</pose></include>
+    <include><uri>model://pine_tree</uri><name>j_pine_13</name><pose>42 60 0 0 0 45</pose></include>
+    <include><uri>model://pine_tree</uri><name>j_pine_14</name><pose>-50 -40 0 0 0 120</pose></include>
+    <include><uri>model://pine_tree</uri><name>j_pine_15</name><pose>15 75 0 0 0 10</pose></include>
+    <include><uri>model://pine_tree</uri><name>j_pine_16</name><pose>-75 5 0 0 0 50</pose></include>
+    <include><uri>model://pine_tree</uri><name>j_pine_17</name><pose>65 -10 0 0 0 80</pose></include>
+    <include><uri>model://pine_tree</uri><name>j_pine_18</name><pose>-15 -60 0 0 0 15</pose></include>
+
+    <include><uri>model://oak_tree</uri><name>j_oak_1</name><pose>45 25 0 0 0 30</pose></include>
+    <include><uri>model://oak_tree</uri><name>j_oak_2</name><pose>-30 50 0 0 0 80</pose></include>
+    <include><uri>model://oak_tree</uri><name>j_oak_3</name><pose>55 -35 0 0 0 15</pose></include>
+    <include><uri>model://oak_tree</uri><name>j_oak_4</name><pose>-48 -20 0 0 0 110</pose></include>
+    <include><uri>model://oak_tree</uri><name>j_oak_5</name><pose>38 -50 0 0 0 45</pose></include>
+    <include><uri>model://oak_tree</uri><name>j_oak_6</name><pose>-60 35 0 0 0 60</pose></include>
+    <include><uri>model://oak_tree</uri><name>j_oak_7</name><pose>75 10 0 0 0 95</pose></include>
+    <include><uri>model://oak_tree</uri><name>j_oak_8</name><pose>-25 -55 0 0 0 20</pose></include>
+    <include><uri>model://oak_tree</uri><name>j_oak_9</name><pose>20 60 0 0 0 75</pose></include>
+    <include><uri>model://oak_tree</uri><name>j_oak_10</name><pose>-70 -5 0 0 0 150</pose></include>
+    <include><uri>model://oak_tree</uri><name>j_oak_11</name><pose>60 45 0 0 0 10</pose></include>
+    <include><uri>model://oak_tree</uri><name>j_oak_12</name><pose>-40 -60 0 0 0 45</pose></include>
+    <include><uri>model://oak_tree</uri><name>j_oak_13</name><pose>80 -20 0 0 0 35</pose></include>
+    <include><uri>model://oak_tree</uri><name>j_oak_14</name><pose>-55 60 0 0 0 115</pose></include>
+    <include><uri>model://oak_tree</uri><name>j_oak_15</name><pose>30 70 0 0 0 50</pose></include>
+
+  </world>
+</sdf>
