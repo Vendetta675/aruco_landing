@@ -25,7 +25,7 @@ class PID:
         self.kp    = kp
         self.ki    = ki
         self.kd    = kd
-        self.limit = limit
+        self.limit = limit # maximum absolute value for output (prevents integral windup and excessive commands)
         self.integral   = 0.0
         self.prev_error = 0.0
         self.prev_time  = None
@@ -37,11 +37,11 @@ class PID:
 
     def update(self, error):
         now = time.time()
-        if self.prev_time is None:
+        if self.prev_time is None: #starting condition: no previous time, so we can't compute dt or derivative
             self.prev_time = now
             # On first call return a proportional-only output so we
             # don't waste the first frame with zero output.
-            return float(np.clip(self.kp * error, -self.limit, self.limit))
+            return float(np.clip(self.kp * error, -self.limit, self.limit)) #
         dt = now - self.prev_time
         self.prev_time = now
         if dt <= 0.0:
@@ -60,9 +60,9 @@ class PID:
 
 class TvecValidator:
 
-    MAX_LATERAL_M = 15.0 # max allowed lateral offset in tvec (handles false detections of distant markers)
-    MAX_CAM_Z_M   = 25.0 # max allowed camera-to-marker distance in tvec (handles false detections of distant markers)
-    MAX_JUMP_M    = 4.0 # max allowed jump in tvec from previous frame (handles detection flicker/jumps)
+    MAX_LATERAL_M = 15.0 # maximum lateral distance of marker in camera frame (beyond this is probably a bad detection)
+    MAX_CAM_Z_M   = 25.0 # maximum altitude of marker in camera frame (beyond this is probably a bad detection)
+    MAX_JUMP_M    = 4.0 # maximum jump distance of marker in camera frame (beyond this is probably a bad detection)
 
     def __init__(self):
         self._prev = None
@@ -72,11 +72,11 @@ class TvecValidator:
 
     def validate(self, tvec):
         x, y, z = float(tvec[0]), float(tvec[1]), float(tvec[2])
-        if z <= 0.05 or z > self.MAX_CAM_Z_M: # too close or too far
+        if z <= 0.05 or z > self.MAX_CAM_Z_M: # altitude too low or too high
             return False
-        if abs(x) > self.MAX_LATERAL_M or abs(y) > self.MAX_LATERAL_M: # too much lateral offset
+        if abs(x) > self.MAX_LATERAL_M or abs(y) > self.MAX_LATERAL_M: # lateral distance too large
             return False
-        if self._prev is not None: # check for large jump from previous tvec
+        if self._prev is not None:
             jump = np.linalg.norm(np.array([x, y, z]) - np.array(self._prev))
             if jump > self.MAX_JUMP_M:
                 return False
@@ -93,85 +93,66 @@ class TvecValidator:
 # is cancelled.                                                                #
 # =========================================================================== #
 
-class ExpandingCrossSearch:
+class SpiralSearch:
 
-    STEP_M = 1.0
+    # metres per spiral leg (grows every 2 legs)
+    STEP_M       = 0.6
+    # time to travel each leg before moving to the next waypoint (seconds)
+    LEG_DWELL    = 2.5
+    # maximum spiral radius before giving up
     MAX_RADIUS_M = 3.0
-    WAYPOINT_TIMEOUT = 10.0
 
     def __init__(self):
         self.reset()
 
     def reset(self):
+        self.active        = False
+        self.origin_x      = 0.0
+        self.origin_y      = 0.0
+        self.origin_z      = 0.0
+        self.wp_x          = 0.0
+        self.wp_y          = 0.0
+        self.leg_index     = 0
+        self.leg_start     = 0.0
+        self.current_step  = self.STEP_M
+        # Directions: right, forward, left, back (world X/Y)
+        self._dirs = [(1,0), (0,1), (-1,0), (0,-1)]
 
-        self.active = False
-
-        self.origin_x = 0.0
-        self.origin_y = 0.0
-        self.origin_z = 0.0
-
-        self.wp_x = 0.0
-        self.wp_y = 0.0
-
-        self.radius_level = 1
-        self.direction_index = 0
-
-        self.leg_start_time = 0.0
-
-        # +X, -X, +Y, -Y
-        self.directions = [
-            (1, 0),
-            (-1, 0),
-            (0, 1),
-            (0, -1)
-        ]
-
-    def start(self, x, y, z):
-
+    def start(self, origin_x, origin_y, origin_z):
         self.reset()
+        self.active    = True
+        self.origin_x  = origin_x
+        self.origin_y  = origin_y
+        self.origin_z  = origin_z
+        self.wp_x      = origin_x
+        self.wp_y      = origin_y
+        self.leg_start = time.time()
+        self.get_next_waypoint()   # set first wp
 
-        self.active = True
-
-        self.origin_x = x
-        self.origin_y = y
-        self.origin_z = z
-
-        self.generate_next_waypoint()
-
-    def generate_next_waypoint(self):
-
-        dx, dy = self.directions[self.direction_index]
-
-        radius = self.radius_level * self.STEP_M
-
-        self.wp_x = self.origin_x + dx * radius
-        self.wp_y = self.origin_y + dy * radius
-
-        self.direction_index += 1
-
-        if self.direction_index >= 4:
-            self.direction_index = 0
-            self.radius_level += 1
-
-        self.leg_start_time = time.time()
+    def get_next_waypoint(self):
+        dir_idx  = self.leg_index % 4
+        leg_mult = (self.leg_index // 2) + 1
+        step     = self.STEP_M * leg_mult
+        dx = self._dirs[dir_idx][0] * step
+        dy = self._dirs[dir_idx][1] * step
+        self.wp_x += dx
+        self.wp_y += dy
+        self.leg_index += 1
+        self.leg_start = time.time()
+        return self.wp_x, self.wp_y
 
     def update(self, drone_x, drone_y):
 
-        if not self.active:
-            return None, None, True
-
-        current_radius = (self.radius_level - 1) * self.STEP_M
-        if current_radius > self.MAX_RADIUS_M:
-            return None, None, True
-
-        dist = math.sqrt((drone_x - self.wp_x) ** 2 +(drone_y - self.wp_y) ** 2)
-
-        elapsed = time.time() - self.leg_start_time
-
-        if dist < 0.30 or elapsed > self.WAYPOINT_TIMEOUT:
-            self.generate_next_waypoint()
-
+        dist = math.sqrt(
+        (drone_x - self.wp_x)**2 +
+        (drone_y - self.wp_y)**2)
+        elapsed = time.time() - self.leg_start
+        if dist < 0.15 or elapsed > 4.0:
+            self.get_next_waypoint()
         return self.wp_x, self.wp_y, False
+        self.sp_x = -target_x
+        self.sp_y = -target_y
+        self.sp_z = self.spiral.origin_z
 
 
 # =========================================================================== #
@@ -187,15 +168,15 @@ class TakeoffPIDLand(Node):
     # ── Setpoint limits ───────────────────────────────────────────────────
     # These limit how far the SETPOINT may be from current POSITION.
     # Larger = more aggressive response; smaller = safer but sluggish.
-    MAX_SP_DIST_XY   = 0.6  # m  — setpoint may lead drone by this much
-    MAX_SP_DIST_Z    = 0.50 # m -   setpoint may lead drone by this much vertically (handles detection noise when close to ground)
+    MAX_SP_DIST_XY   = 0.60   # m  — setpoint may lead drone by this much
+    MAX_SP_DIST_Z    = 0.30   # m
 
     # ── Detection ────────────────────────────────────────────────────────
     LOST_FRAME_THRESHOLD = 6
 
     # ── Tracking mode IDs ─────────────────────────────────────────────────
     TRACK_ARUCO  = 0
-    TRACK_SEARCH = 1
+    TRACK_SPIRAL = 1
     TRACK_HOLD   = 2
 
     def __init__(self):
@@ -218,7 +199,8 @@ class TakeoffPIDLand(Node):
         self.last_detection_time = time.time()
 
         self.validator = TvecValidator()
-        self.cross_search = ExpandingCrossSearch()
+        self.spiral    = SpiralSearch()
+
         # ── ArUco landing PIDs ────────────────────────────────────────────
         #
         # DESIGN RATIONALE
@@ -237,9 +219,9 @@ class TakeoffPIDLand(Node):
         # Z: kp=0.9 so a 2 m altitude error → 0.9*2=1.8 (clamped 0.30)
         # → 0.30 m/step descent.  Fast but safe.
 
-        self.pid_x = PID(kp=0.65, ki=0.000, kd=0.18, limit=self.MAX_SP_DIST_XY)
-        self.pid_y = PID(kp=0.65, ki=0.000, kd=0.18, limit=self.MAX_SP_DIST_XY)
-        self.pid_z = PID(kp=0.75, ki=0.015, kd=0.10, limit=self.MAX_SP_DIST_Z)
+        self.pid_x = PID(kp=1.2, ki=0.008, kd=0.15, limit=self.MAX_SP_DIST_XY)
+        self.pid_y = PID(kp=1.2, ki=0.008, kd=0.15, limit=self.MAX_SP_DIST_XY)
+        self.pid_z = PID(kp=0.9, ki=0.010, kd=0.05, limit=self.MAX_SP_DIST_Z)
 
         qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -297,13 +279,13 @@ class TakeoffPIDLand(Node):
         if self.stage != 5:
             return
 
-        frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8') # Convert ROS Image to OpenCV format
-        gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) # Convert to grayscale for ArUco detection
+        frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
+        gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         corners, ids, _ = cv2.aruco.detectMarkers(
-            gray, self.aruco_dict, parameters=self.aruco_params) # Detect ArUco markers in the image
+            gray, self.aruco_dict, parameters=self.aruco_params)
 
-        if ids is not None and len(ids) > 0: # If at least one marker is detected
+        if ids is not None and len(ids) > 0:
 
             _, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
                 corners, self.marker_size,
@@ -354,10 +336,9 @@ class TakeoffPIDLand(Node):
         self._last_tvec      = np.array(tvec).copy()
         self._marker_visible = True
 
-        if self.cross_search.active:
-            self.cross_search.reset()
-            self.get_logger().info(
-            '[SEARCH] Cancelled — marker re-acquired.')
+        if self.spiral.active:
+            self.spiral.reset()
+            self.get_logger().info('[SPIRAL] Cancelled — marker re-acquired.')
 
         self.tracking_mode = self.TRACK_ARUCO
 
@@ -383,7 +364,7 @@ class TakeoffPIDLand(Node):
         altitude_error = cam_z - self.LANDING_ALTITUDE
         delta_z        = -self.pid_z.update(altitude_error)
         # Hard cap: never command more than 0.12 m descent per cycle
-        delta_z = float(np.clip(delta_z, -0.04, 0.04))
+        delta_z = float(np.clip(delta_z, -0.12, 0.12))
 
         # Accumulate setpoint from PREVIOUS setpoint (not from pos)
         # so it leads the drone toward the marker.
@@ -417,103 +398,101 @@ class TakeoffPIDLand(Node):
     # MARKER LOST → SPIRAL SEARCH                                         #
     # ================================================================== #
 
-    
     def _on_marker_lost(self):
-
         """
-        Expanding cross search.
+        Replace dead-reckoning with a spiral search.
 
-        Pattern:
-        +X
-        -X
-        +Y
-        -Y
-        +2X
-        -2X
-        +2Y
-        -2Y
-        ...
+        WHY SPIRAL INSTEAD OF DR
+        ────────────────────────
+        Dead-reckoning propagates a tvec estimate into world coordinates.
+        This estimate is only as good as the last tvec, which is often
+        noisy (the marker was partially visible, or the drone was moving).
+        A bad seed sends the drone in the wrong direction, making recovery
+        worse, not better.
 
-        Much more stable than a spiral for camera-based reacquisition.
+        A spiral search makes NO assumption about where the marker is.
+        It systematically covers the area around the last-known drone
+        position until the marker re-enters the camera FOV.  Because the
+        marker is always close (we saw it recently), a small spiral
+        (radius ≤ 3 m, step 0.6 m) reliably re-acquires it.
         """
-
         if self._marker_visible:
-
-        # Transition: tracking -> lost
+            # Transition: was tracking, now lost
             self._marker_visible = False
-
             self.pid_x.reset()
             self.pid_y.reset()
             self.pid_z.reset()
 
-        if not self.cross_search.active:
+            if not self.spiral.active:
+                # Start spiral from current position, hold current altitude
+                self.spiral.start(self.x_pos, self.y_pos, self.z_pos)
+                self.tracking_mode = self.TRACK_SPIRAL
+                self.get_logger().warn(
+                    f'[SPIRAL] Started from '
+                    f'({self.x_pos:.2f}, {self.y_pos:.2f}, {self.z_pos:.2f})'
+                )
 
-            self.cross_search.start(
-                self.x_pos,
-                self.y_pos,
-                self.z_pos
-            )
-
-            self.tracking_mode = self.TRACK_SEARCH
-
-            self.get_logger().warn(
-                f'[SEARCH] Started from '
-                f'({self.x_pos:.2f}, '
-                f'{self.y_pos:.2f}, '
-                f'{self.z_pos:.2f})'
-            )
-
-    # Safety fallback
-        if not self.cross_search.active:
-
+        if not self.spiral.active:
+            # Spiral was never started (lost_frames fired without prior
+            # ARUCO track) — just hold position
             self.tracking_mode = self.TRACK_HOLD
-
             self.sp_x = self.x_pos
             self.sp_y = self.y_pos
             self.sp_z = self.z_pos
             return
 
-    # Get next search waypoint
-        target_x, target_y, exceeded = self.cross_search.update(
-        self.x_pos,
-        self.y_pos)
+        # ── Execute spiral waypoint ───────────────────────────────────
+        target_x, target_y, exceeded = self.spiral.update(
+            self.x_pos, self.y_pos)
 
-    # Search exhausted
         if exceeded:
-            self.get_logger().error('[SEARCH] Max radius reached — HOLD.')
-            self.cross_search.reset()
+            self.get_logger().error(
+                '[SPIRAL] Max radius reached — HOLD.')
+            self.spiral.reset()
             self.tracking_mode = self.TRACK_HOLD
             self.sp_x = self.x_pos
             self.sp_y = self.y_pos
             self.sp_z = self.z_pos
             return
 
-    # Command waypoint directly
-        self.sp_x = float(target_x)
-        self.sp_y = float(target_y)
+        # Command setpoint directly to the spiral waypoint.
+        # Clamp to MAX_SP_DIST_XY from current pos for safety.
+        self.sp_x = float(np.clip(
+            target_x,
+            self.x_pos - self.MAX_SP_DIST_XY,
+            self.x_pos + self.MAX_SP_DIST_XY))
+        self.sp_y = float(np.clip(
+            target_y,
+            self.y_pos - self.MAX_SP_DIST_XY,
+            self.y_pos + self.MAX_SP_DIST_XY))
+        self.sp_z = self.spiral.origin_z   # hold altitude from spiral start
 
-    # Hold altitude during search
-        self.sp_z = self.cross_search.origin_z
-        dist_to_wp = math.sqrt((target_x - self.x_pos) ** 2 +(target_y - self.y_pos) ** 2)
+        dist_to_wp = math.sqrt(
+            (target_x - self.x_pos)**2 +
+            (target_y - self.y_pos)**2)
 
         self.get_logger().warn(
-        f'[SEARCH] '
-        f'radius:{self.cross_search.radius_level} | '
-        f'wp({target_x:.2f}, {target_y:.2f}) | '
-        f'dist:{dist_to_wp:.2f}m | '
-        f'sp({self.sp_x:.2f}, '
-        f'{self.sp_y:.2f}, 'f'{self.sp_z:.2f})')
+            f'[SPIRAL] leg:{self.spiral.leg_index} | '
+            f'wp({target_x:.2f}, {target_y:.2f}) | '
+            f'dist_to_wp:{dist_to_wp:.2f}m | '
+            f'sp({self.sp_x:.2f}, {self.sp_y:.2f}, {self.sp_z:.2f})'
+        )
+
+    # ================================================================== #
+    # SETPOINT PUBLISHER                                                  #
+    # ================================================================== #
+
     def _publish_setpoint(self):
+
         if self.stage < 4:
             return
+
         msg = PoseStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'map'
-
-        msg.pose.position.x = self.sp_x
-        msg.pose.position.y = self.sp_y
-        msg.pose.position.z = self.sp_z
-
+        msg.header.stamp       = self.get_clock().now().to_msg()
+        msg.header.frame_id    = 'map'
+        msg.pose.position.x    = self.sp_x
+        msg.pose.position.y    = self.sp_y
+        msg.pose.position.z    = self.sp_z
         msg.pose.orientation.w = 1.0
 
         self.pos_pub.publish(msg)
@@ -573,7 +552,7 @@ class TakeoffPIDLand(Node):
 
             status_map = {
                 self.TRACK_ARUCO:  'ARUCO',
-                self.TRACK_SEARCH: 'SEARCH',
+                self.TRACK_SPIRAL: 'SPIRAL',
                 self.TRACK_HOLD:   'HOLD',
             }
             self.get_logger().info(

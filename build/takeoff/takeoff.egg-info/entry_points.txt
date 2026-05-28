@@ -1,0 +1,2 @@
+[console_scripts]
+auto_takeoff = takeoff.auto_takeoff:main
