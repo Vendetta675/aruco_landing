@@ -1,4 +1,27 @@
 #!/usr/bin/env python3
+"""
+ArUco Precision-Landing Node  —  tuned for 2 m × 2 m marker
+=============================================================
+
+All parameters are calibrated for:
+- ArUco DICT_4X4_50, marker ID 0, physical size 2.0 m × 2.0 m
+- Downward-facing gimbal camera, 640×480, fx=fy≈205.5
+
+tvec convention (estimatePoseSingleMarkers, nadir camera):
+tvec[0]  cam_x  right=+   
+tvec[1]  cam_y  fwd/down  
+tvec[2]  cam_z  depth     =  altitude above marker  (scales with marker_size)
+
+Stage-5 sub-states
+------------------
+SEARCHING    Gentle expanding-square drift (rate-limited, no jerks).
+             Altitude held constant.
+STABILISING  Marker just appeared — hold position, wait N clean frames
+             before starting descent (prevents jerk on noisy first frame).
+TRACKING     Calculates global marker position with YAW COMPENSATION, coasts toward it, descends once lateral < threshold.
+BLIND_DESCENT cam_z < BLIND_ALT_THRESHOLD — last good XY frozen,
+             descend straight down.
+"""
 
 import rclpy
 import numpy as np
@@ -16,53 +39,14 @@ import math
 
 
 # =========================================================================== #
-# PID                                                                          #
-# =========================================================================== #
-
-class PID:
-
-    def __init__(self, kp, ki, kd, limit):
-        self.kp    = kp
-        self.ki    = ki
-        self.kd    = kd
-        self.limit = limit
-        self.integral   = 0.0
-        self.prev_error = 0.0
-        self.prev_time  = None
-
-    def reset(self):
-        self.integral   = 0.0
-        self.prev_error = 0.0
-        self.prev_time  = None
-
-    def update(self, error):
-        now = time.time()
-        if self.prev_time is None:
-            self.prev_time = now
-            # On first call return a proportional-only output so we
-            # don't waste the first frame with zero output.
-            return float(np.clip(self.kp * error, -self.limit, self.limit))
-        dt = now - self.prev_time
-        self.prev_time = now
-        if dt <= 0.0:
-            return float(np.clip(self.kp * error, -self.limit, self.limit))
-        self.integral = np.clip(
-            self.integral + error * dt, -self.limit / self.kp, self.limit / self.kp)
-        derivative      = (error - self.prev_error) / dt
-        self.prev_error = error
-        out = (self.kp * error + self.ki * self.integral + self.kd * derivative)
-        return float(np.clip(out, -self.limit, self.limit))
-
-
-# =========================================================================== #
 # TVEC VALIDATOR                                                               #
 # =========================================================================== #
 
 class TvecValidator:
-
-    MAX_LATERAL_M = 15.0 # max allowed lateral offset in tvec (handles false detections of distant markers)
-    MAX_CAM_Z_M   = 25.0 # max allowed camera-to-marker distance in tvec (handles false detections of distant markers)
-    MAX_JUMP_M    = 4.0 # max allowed jump in tvec from previous frame (handles detection flicker/jumps)
+    """Rejects physically implausible tvec readings."""
+    MAX_LATERAL_M = 30.0   # 2 m marker → errors up to ~15 m are valid
+    MAX_CAM_Z_M   = 40.0
+    MAX_JUMP_M    = 8.0    # max frame-to-frame change
 
     def __init__(self):
         self._prev = None
@@ -72,11 +56,11 @@ class TvecValidator:
 
     def validate(self, tvec):
         x, y, z = float(tvec[0]), float(tvec[1]), float(tvec[2])
-        if z <= 0.05 or z > self.MAX_CAM_Z_M: # too close or too far
+        if z <= 0.1 or z > self.MAX_CAM_Z_M:
             return False
-        if abs(x) > self.MAX_LATERAL_M or abs(y) > self.MAX_LATERAL_M: # too much lateral offset
+        if abs(x) > self.MAX_LATERAL_M or abs(y) > self.MAX_LATERAL_M:
             return False
-        if self._prev is not None: # check for large jump from previous tvec
+        if self._prev is not None:
             jump = np.linalg.norm(np.array([x, y, z]) - np.array(self._prev))
             if jump > self.MAX_JUMP_M:
                 return False
@@ -85,93 +69,72 @@ class TvecValidator:
 
 
 # =========================================================================== #
-# SPIRAL SEARCH                                                                #
-#                                                                              #
-# When the marker is lost we execute an outward square spiral from the        #
-# last-known position. Each leg grows by STEP_M every two legs so the drone   #
-# covers progressively more area.  Once the marker is re-acquired the search  #
-# is cancelled.                                                                #
+# GENTLE EXPANDING-SQUARE SEARCH                                               #
 # =========================================================================== #
 
-class ExpandingCrossSearch:
-
-    STEP_M = 1.0
-    MAX_RADIUS_M = 3.0
-    WAYPOINT_TIMEOUT = 10.0
+class GentleExpandingSearch:
+    """
+    Outward expanding-square spiral.
+    Setpoint changes are rate-limited → smooth drift, never jerky.
+    Altitude held constant throughout.
+    """
+    SEARCH_STEP = 1.0   # m — square expands by this each revolution
+    MAX_RADIUS  = 10.0   # m — give up beyond this
+    WP_RADIUS   = 0.4    # m — waypoint acceptance radius
+    WP_TIMEOUT  = 15.0   # s — hard per-waypoint time limit
+    MAX_SP_RATE = 0.20   # m/s — rate-limit on setpoint motion
 
     def __init__(self):
-        self.reset()
+        self.active = False
+        self.origin_x = self.origin_y = self.altitude = 0.0
+        self._waypoints = []; self._wp_idx = 0; self._wp_time = 0.0
+        self._smooth_x = self._smooth_y = 0.0; self._last_t = None
+
+    def start(self, ox, oy, alt):
+        self.active = True
+        self.origin_x = ox; self.origin_y = oy; self.altitude = alt
+        self._smooth_x = ox; self._smooth_y = oy
+        self._last_t = time.time()
+        self._waypoints = self._spiral(ox, oy)
+        self._wp_idx = 0; self._wp_time = time.time()
 
     def reset(self):
-
         self.active = False
 
-        self.origin_x = 0.0
-        self.origin_y = 0.0
-        self.origin_z = 0.0
-
-        self.wp_x = 0.0
-        self.wp_y = 0.0
-
-        self.radius_level = 1
-        self.direction_index = 0
-
-        self.leg_start_time = 0.0
-
-        # +X, -X, +Y, -Y
-        self.directions = [
-            (1, 0),
-            (-1, 0),
-            (0, 1),
-            (0, -1)
-        ]
-
-    def start(self, x, y, z):
-
-        self.reset()
-
-        self.active = True
-
-        self.origin_x = x
-        self.origin_y = y
-        self.origin_z = z
-
-        self.generate_next_waypoint()
-
-    def generate_next_waypoint(self):
-
-        dx, dy = self.directions[self.direction_index]
-
-        radius = self.radius_level * self.STEP_M
-
-        self.wp_x = self.origin_x + dx * radius
-        self.wp_y = self.origin_y + dy * radius
-
-        self.direction_index += 1
-
-        if self.direction_index >= 4:
-            self.direction_index = 0
-            self.radius_level += 1
-
-        self.leg_start_time = time.time()
+    def _spiral(self, ox, oy):
+        wps = []; x, y = ox, oy; step = self.SEARCH_STEP
+        leg = 1; dirs = [(1,0),(0,1),(-1,0),(0,-1)]; di = 0
+        while True:
+            for _ in range(2):
+                dx, dy = dirs[di % 4]; di += 1
+                for _ in range(leg):
+                    x += dx * step; y += dy * step
+                    if math.sqrt((x-ox)**2+(y-oy)**2) > self.MAX_RADIUS:
+                        return wps
+                    wps.append((x, y))
+            leg += 1
 
     def update(self, drone_x, drone_y):
-
-        if not self.active:
-            return None, None, True
-
-        current_radius = (self.radius_level - 1) * self.STEP_M
-        if current_radius > self.MAX_RADIUS_M:
-            return None, None, True
-
-        dist = math.sqrt((drone_x - self.wp_x) ** 2 +(drone_y - self.wp_y) ** 2)
-
-        elapsed = time.time() - self.leg_start_time
-
-        if dist < 0.30 or elapsed > self.WAYPOINT_TIMEOUT:
-            self.generate_next_waypoint()
-
-        return self.wp_x, self.wp_y, False
+        """Returns (sp_x, sp_y, exhausted)."""
+        if not self.active or not self._waypoints:
+            return self.origin_x, self.origin_y, True
+        now = time.time()
+        dt = (now - self._last_t) if self._last_t else 0.05
+        self._last_t = now
+        if self._wp_idx < len(self._waypoints):
+            wx, wy = self._waypoints[self._wp_idx]
+            if (math.sqrt((drone_x-wx)**2+(drone_y-wy)**2) < self.WP_RADIUS
+                    or now - self._wp_time > self.WP_TIMEOUT):
+                self._wp_idx += 1; self._wp_time = now
+        if self._wp_idx >= len(self._waypoints):
+            return self._smooth_x, self._smooth_y, True
+        wx, wy = self._waypoints[self._wp_idx]
+        ex = wx - self._smooth_x; ey = wy - self._smooth_y
+        d = math.sqrt(ex**2 + ey**2)
+        if d > 1e-4:
+            mv = min(self.MAX_SP_RATE * dt, d)
+            self._smooth_x += ex/d * mv; self._smooth_y += ey/d * mv
+        return self._smooth_x, self._smooth_y, False
 
 
 # =========================================================================== #
@@ -180,88 +143,85 @@ class ExpandingCrossSearch:
 
 class TakeoffPIDLand(Node):
 
-    # ── Landing geometry ─────────────────────────────────────────────────
-    LANDING_ALTITUDE = 0.5    # m above marker — trigger LAND below this
-    LANDING_DEADBAND = 0.08   # m  lateral/altitude tolerance to trigger LAND
+    SS_SEARCHING   = 'SEARCHING'
+    SS_STABILISING = 'STABILISING'
+    SS_TRACKING    = 'TRACKING'
+    SS_BLIND       = 'BLIND_DESCENT'
 
-    # ── Setpoint limits ───────────────────────────────────────────────────
-    # These limit how far the SETPOINT may be from current POSITION.
-    # Larger = more aggressive response; smaller = safer but sluggish.
-    MAX_SP_DIST_XY   = 0.6  # m  — setpoint may lead drone by this much
-    MAX_SP_DIST_Z    = 0.50 # m -   setpoint may lead drone by this much vertically (handles detection noise when close to ground)
+    # ── MARKER ────────────────────────────────────────────────────────────
+    MARKER_SIZE = 2.0           # metres
 
-    # ── Detection ────────────────────────────────────────────────────────
-    LOST_FRAME_THRESHOLD = 6
+    # ── LANDING GEOMETRY ──────────────────────────────────────────────────
+    LANDING_ALTITUDE    = 1.0   # m above marker → trigger LAND mode
+    LANDING_DEADBAND    = 0.50  # m lateral tolerance for LAND
 
-    # ── Tracking mode IDs ─────────────────────────────────────────────────
-    TRACK_ARUCO  = 0
-    TRACK_SEARCH = 1
-    TRACK_HOLD   = 2
+    # ── BLIND DESCENT ─────────────────────────────────────────────────────
+    BLIND_ALT_THRESHOLD = 1.0   # m
+    BLIND_DESCENT_RATE  = 0.03  # m lowered per control cycle
+
+    # ── SETPOINT CLAMPS ───────────────────────────────────────────────────
+    MAX_SP_DIST_XY = 1.0        # m — max setpoint offset from current pos XY
+    MAX_SP_DIST_Z  = 0.6        # m — max setpoint offset from current pos Z
+
+    # ── DETECTION ─────────────────────────────────────────────────────────
+    LOST_FRAME_THRESHOLD = 6    # consecutive missed frames → SEARCHING
+    STABILISE_FRAMES     = 8    # consecutive valid frames → leave STABILISING
+
+    # ── DESCENT GATE ──────────────────────────────────────────────────────
+    CENTRE_THRESHOLD = 0.60     # m in cam frame
+    DESCENT_STEP_M   = 0.02     # m per control cycle — gradual, not aggressive
 
     def __init__(self):
-
         super().__init__('auto_takeoff')
 
         self.state = State()
-
         self.x_pos = self.y_pos = self.z_pos = 0.0
-        self.sp_x  = self.sp_y = self.sp_z  = 0.0
+        self.sp_x  = self.sp_y = self.sp_z   = 0.0
 
         self.stage             = 0
         self.altitude_received = False
-        self.tracking_mode     = self.TRACK_HOLD
+        self.sub_state         = self.SS_SEARCHING
 
         self._marker_visible = False
         self._last_tvec      = None
         self.lost_frames     = 0
-
-        self.last_detection_time = time.time()
+        self._stab_frames    = 0
+        self._blind_sp_x     = None
+        self._blind_sp_y     = None
+        
+        # Position & Yaw Memory Variables
+        self.last_marker_global_x = None
+        self.last_marker_global_y = None
+        self.yaw                  = 0.0  # Added for coordinate rotation
 
         self.validator = TvecValidator()
-        self.cross_search = ExpandingCrossSearch()
-        # ── ArUco landing PIDs ────────────────────────────────────────────
-        #
-        # DESIGN RATIONALE
-        # ─────────────────
-        # We want the drone to move QUICKLY toward the marker centre so
-        # it converges before losing sight of it.  Previous versions used
-        # kp=0.4–0.8; this caused slow convergence → orbit → marker loss.
-        #
-        # kp=1.2 means: 1 m lateral error → 1.2 m/cycle command (clamped
-        # to MAX_SP_DIST_XY=0.60).  At 20 Hz the drone covers ~0.60 m per
-        # 50 ms step.  The flight controller will smoothly execute this.
-        #
-        # kd=0.15 damps oscillation as the drone approaches centre.
-        # ki=0.008 removes steady-state offset (e.g. constant wind bias).
-        #
-        # Z: kp=0.9 so a 2 m altitude error → 0.9*2=1.8 (clamped 0.30)
-        # → 0.30 m/step descent.  Fast but safe.
-
-        self.pid_x = PID(kp=0.65, ki=0.000, kd=0.18, limit=self.MAX_SP_DIST_XY)
-        self.pid_y = PID(kp=0.65, ki=0.000, kd=0.18, limit=self.MAX_SP_DIST_XY)
-        self.pid_z = PID(kp=0.75, ki=0.015, kd=0.10, limit=self.MAX_SP_DIST_Z)
+        self.search    = GentleExpandingSearch()
 
         qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=10
-        )
+            history=HistoryPolicy.KEEP_LAST, depth=10)
 
-        self.bridge       = CvBridge()
-        self.aruco_dict   = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-        self.aruco_params = cv2.aruco.DetectorParameters()
+        self.bridge = CvBridge()
+
+        # OpenCV ArUco — DICT_4X4_50, marker ID 0
+        self.aruco_dict     = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+        self.aruco_params   = cv2.aruco.DetectorParameters()
+        self.aruco_detector = cv2.aruco.ArucoDetector(
+            self.aruco_dict, self.aruco_params)
 
         self.camera_matrix = np.array([
             [205.4696273803711, 0.0,               320.0],
             [0.0,               205.4696559906006, 240.0],
-            [0.0,               0.0,                 1.0]
-        ])
-        self.dist_coeffs = np.zeros((5, 1))
-        self.marker_size = 0.2   # metres
+            [0.0,               0.0,                 1.0],
+        ], dtype=np.float64)
+        self.dist_coeffs = np.zeros((5, 1), dtype=np.float64)
 
-        self.create_subscription(State,       '/mavros/state',               self.state_cb,       10)
-        self.create_subscription(PoseStamped, '/mavros/local_position/pose', self.pos_cb,         qos)
-        self.create_subscription(Image,       '/camera_image',               self.image_callback, 10)
+        self.create_subscription(State,
+            '/mavros/state', self.state_cb, 10)
+        self.create_subscription(PoseStamped,
+            '/mavros/local_position/pose', self.pos_cb, qos)
+        self.create_subscription(Image,
+            '/camera_image', self.image_callback, 10)
 
         self.pos_pub = self.create_publisher(
             PoseStamped, '/mavros/setpoint_position/local', 10)
@@ -273,7 +233,11 @@ class TakeoffPIDLand(Node):
         self.timer    = self.create_timer(0.05, self.control_loop)
         self.sp_timer = self.create_timer(0.05, self._publish_setpoint)
 
-        self.get_logger().info('TakeoffPIDLand node started.')
+        self.get_logger().info(
+            f'TakeoffPIDLand started | '
+            f'MARKER_SIZE={self.MARKER_SIZE}m | '
+            f'BLIND_THRESH={self.BLIND_ALT_THRESHOLD}m | '
+            f'CENTRE_THRESH={self.CENTRE_THRESHOLD}m')
 
     # ================================================================== #
     # CALLBACKS                                                           #
@@ -286,6 +250,13 @@ class TakeoffPIDLand(Node):
         self.x_pos = msg.pose.position.x
         self.y_pos = msg.pose.position.y
         self.z_pos = msg.pose.position.z
+        
+        # Convert MAVROS quaternion to Euler Yaw (radians)
+        q = msg.pose.orientation
+        siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+        self.yaw = math.atan2(siny_cosp, cosy_cosp)
+        
         self.altitude_received = True
 
     # ================================================================== #
@@ -293,229 +264,206 @@ class TakeoffPIDLand(Node):
     # ================================================================== #
 
     def image_callback(self, msg):
-
         if self.stage != 5:
             return
 
-        frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8') # Convert ROS Image to OpenCV format
-        gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) # Convert to grayscale for ArUco detection
+        frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
+        gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        corners, ids, _ = cv2.aruco.detectMarkers(
-            gray, self.aruco_dict, parameters=self.aruco_params) # Detect ArUco markers in the image
+        corners, ids, _ = self.aruco_detector.detectMarkers(gray)
 
-        if ids is not None and len(ids) > 0: # If at least one marker is detected
+        detected = False
+        if ids is not None:
+            for i, mid in enumerate(ids.flatten()):
+                if mid == 0:
+                    rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
+                        [corners[i]], self.MARKER_SIZE,
+                        self.camera_matrix, self.dist_coeffs)
+                    tvec = tvecs[0][0]
+                    if self.validator.validate(tvec):
+                        self._on_marker_detected(tvec)
+                        self.lost_frames = 0
+                        detected = True
+                        break
 
-            _, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
-                corners, self.marker_size,
-                self.camera_matrix, self.dist_coeffs)
-
-            tvec = tvecs[0][0]
-
-            if self.validator.validate(tvec):
-                self.lost_frames         = 0
-                self.last_detection_time = time.time()
-                self._on_aruco_detected(tvec)
-                return
-
-        # Marker not seen this frame
-        self.lost_frames += 1
-        if self.lost_frames >= self.LOST_FRAME_THRESHOLD:
-            self._on_marker_lost()
+        if not detected:
+            self.lost_frames += 1
+            if self.lost_frames >= self.LOST_FRAME_THRESHOLD:
+                self._on_marker_lost()
 
     # ================================================================== #
-    # ARUCO DETECTED                                                      #
+    # MARKER DETECTED                                                     #
     # ================================================================== #
 
-    def _on_aruco_detected(self, tvec):
-        """
-        Downward-facing camera → world frame:
-        tvec[0]  cam_x  right=+   maps to world Y
-        tvec[1]  cam_y  fwd=+     maps to world X
-        tvec[2]  cam_z  depth = altitude above marker
+    def _on_marker_detected(self, tvec):
+        self._last_tvec = np.array(tvec, dtype=float).copy()
 
-        Control law
-        ───────────
-        The setpoint is computed as:
+        # Blind descent: ignore new detections, keep XY frozen
+        if self.sub_state == self.SS_BLIND:
+            return
 
-            sp_x = x_pos + pid_x(cam_y)   ← move forward/back to zero cam_y
-            sp_y = y_pos + pid_y(cam_x)   ← move left/right  to zero cam_x
-            sp_z = z_pos - pid_z(cam_z - LANDING_ALTITUDE)
-
-        We accumulate from the CURRENT SETPOINT (not pos) so the
-        setpoint leads the drone.  The safety clamp keeps sp within
-        MAX_SP_DIST_XY of current position.
-
-        KEY INSIGHT: We do NOT reset the setpoint to pos on
-        re-acquisition.  We let it accumulate so the drone keeps
-        moving toward the marker even if detection flickers.
-        """
-        was_lost = not self._marker_visible
-
-        self._last_tvec      = np.array(tvec).copy()
-        self._marker_visible = True
-
-        if self.cross_search.active:
-            self.cross_search.reset()
+        # First frame after loss → stabilise before doing anything
+        if not self._marker_visible:
+            self._marker_visible = True
+            self._stab_frames    = 0
+            self.search.reset()
+            self.sub_state = self.SS_STABILISING
             self.get_logger().info(
-            '[SEARCH] Cancelled — marker re-acquired.')
+                f'[STABILISING] Marker acquired | '
+                f'cam({tvec[0]:+.2f}, {tvec[1]:+.2f}, {tvec[2]:.2f})')
 
-        self.tracking_mode = self.TRACK_ARUCO
+        if self.sub_state == self.SS_STABILISING:
+            self._stab_frames += 1
+            if self._stab_frames >= self.STABILISE_FRAMES:
+                self.sub_state = self.SS_TRACKING
+                self.get_logger().info('[TRACKING] Stable — beginning descent.')
+            return   # do NOT move setpoint during stabilisation
 
-        if was_lost:
-            # Reset PIDs on re-acquisition to clear stale integrals
-            self.pid_x.reset()
-            self.pid_y.reset()
-            self.pid_z.reset()
-            self.get_logger().info('[ARUCO] Re-acquired — PIDs reset.')
+        if self.sub_state == self.SS_TRACKING:
+            self._run_tracking(tvec)
 
-        cam_x = float(tvec[0])   # lateral (right=+)
-        cam_y = float(tvec[1])   # forward (fwd=+)
-        cam_z = float(tvec[2])   # altitude above marker
+    # ------------------------------------------------------------------ #
+    # GLOBAL TRACKING (WITH YAW ROTATION)                                 #
+    # ------------------------------------------------------------------ #
 
-        # XY: error = offset of marker in camera frame
-        # Positive cam_y means marker is AHEAD → move sp_x forward
-        # Positive cam_x means marker is RIGHT  → move sp_y rightward
-        delta_x = self.pid_x.update(cam_y)
-        delta_y = self.pid_y.update(cam_x)
+    def _run_tracking(self, tvec):
+        cam_x = float(tvec[0])
+        cam_y = float(tvec[1])
+        cam_z = float(tvec[2])
+        lateral = math.sqrt(cam_x**2 + cam_y**2)
 
-        # Z: descend until cam_z == LANDING_ALTITUDE
-        # cam_z > LANDING_ALTITUDE → too high → negative delta_z (descend)
-        altitude_error = cam_z - self.LANDING_ALTITUDE
-        delta_z        = -self.pid_z.update(altitude_error)
-        # Hard cap: never command more than 0.12 m descent per cycle
-        delta_z = float(np.clip(delta_z, -0.04, 0.04))
+        if cam_z < self.BLIND_ALT_THRESHOLD:
+            self._enter_blind_descent()
+            return
 
-        # Accumulate setpoint from PREVIOUS setpoint (not from pos)
-        # so it leads the drone toward the marker.
-        new_sp_x = self.sp_x + delta_x
-        new_sp_y = self.sp_y + delta_y
-        new_sp_z = self.sp_z + delta_z
+        # 1. Map camera frame to Drone Body frame (Forward-Left-Up)
+        # Standard nadir camera: top of image (-cam_y) is forward, right (+cam_x) is right
+        body_forward = cam_y
+        body_left    = -cam_x  # left is opposite of right
 
-        # Safety clamp: sp may not exceed MAX_SP_DIST from current pos
-        self.sp_x = float(np.clip(new_sp_x,
-            self.x_pos - self.MAX_SP_DIST_XY,
-            self.x_pos + self.MAX_SP_DIST_XY))
-        self.sp_y = float(np.clip(new_sp_y,
-            self.y_pos - self.MAX_SP_DIST_XY,
-            self.y_pos + self.MAX_SP_DIST_XY))
-        self.sp_z = float(np.clip(new_sp_z,
-            self.z_pos - self.MAX_SP_DIST_Z,
-            self.z_pos + self.MAX_SP_DIST_Z))
+        # 2. Rotate body frame error to Global ENU map frame using drone's yaw
+        # This completely negates spiraling/drifting no matter the drone's heading.
+        global_err_x = (body_forward * math.cos(self.yaw)) - (body_left * math.sin(self.yaw))
+        global_err_y = (body_forward * math.sin(self.yaw)) + (body_left * math.cos(self.yaw))
 
-        lateral_dist = math.sqrt(cam_x**2 + cam_y**2)
+        marker_global_x = self.x_pos + global_err_x
+        marker_global_y = self.y_pos + global_err_y
+
+        self.last_marker_global_x = marker_global_x
+        self.last_marker_global_y = marker_global_y
+
+        # 3. SMOOTHLY MOVE SETPOINT TOWARDS MARKER
+        P_gain = 0.6 
+        target_x = self.x_pos + P_gain * (marker_global_x + self.x_pos)
+        target_y = self.y_pos + P_gain * (marker_global_y + self.y_pos)
+
+        # CLAMP THE SETPOINT: Prevents aggressive pitch and camera FOV loss
+        self.sp_x = float(np.clip(target_x, self.x_pos - self.MAX_SP_DIST_XY, self.x_pos + self.MAX_SP_DIST_XY))
+        self.sp_y = float(np.clip(target_y, self.y_pos - self.MAX_SP_DIST_XY, self.y_pos + self.MAX_SP_DIST_XY))
+
+        # Altitude: only descend once centred
+        if lateral < self.CENTRE_THRESHOLD:
+            self.sp_z = float(np.clip(
+                self.sp_z - self.DESCENT_STEP_M,
+                self.z_pos - self.MAX_SP_DIST_Z,
+                self.z_pos + self.MAX_SP_DIST_Z))
 
         self.get_logger().info(
-            f'[ARUCO] '
-            f'cam({cam_x:+.3f}, {cam_y:+.3f}, {cam_z:.3f}) | '
-            f'lateral:{lateral_dist:.3f}m | '
-            f'alt_err:{altitude_error:+.3f} | '
-            f'Δ({delta_x:+.3f}, {delta_y:+.3f}, {delta_z:+.3f}) | '
-            f'sp({self.sp_x:.2f}, {self.sp_y:.2f}, {self.sp_z:.2f})'
-        )
+            f'[TRACKING] '
+            f'lat:{lateral:.3f}m | yaw:{math.degrees(self.yaw):.1f}° | '
+            f'sp({self.sp_x:.2f},{self.sp_y:.2f},{self.sp_z:.2f})')
 
     # ================================================================== #
-    # MARKER LOST → SPIRAL SEARCH                                         #
+    # BLIND DESCENT                                                       #
     # ================================================================== #
 
-    
-    def _on_marker_lost(self):
-
-        """
-        Expanding cross search.
-
-        Pattern:
-        +X
-        -X
-        +Y
-        -Y
-        +2X
-        -2X
-        +2Y
-        -2Y
-        ...
-
-        Much more stable than a spiral for camera-based reacquisition.
-        """
-
-        if self._marker_visible:
-
-        # Transition: tracking -> lost
-            self._marker_visible = False
-
-            self.pid_x.reset()
-            self.pid_y.reset()
-            self.pid_z.reset()
-
-        if not self.cross_search.active:
-
-            self.cross_search.start(
-                self.x_pos,
-                self.y_pos,
-                self.z_pos
-            )
-
-            self.tracking_mode = self.TRACK_SEARCH
-
-            self.get_logger().warn(
-                f'[SEARCH] Started from '
-                f'({self.x_pos:.2f}, '
-                f'{self.y_pos:.2f}, '
-                f'{self.z_pos:.2f})'
-            )
-
-    # Safety fallback
-        if not self.cross_search.active:
-
-            self.tracking_mode = self.TRACK_HOLD
-
-            self.sp_x = self.x_pos
-            self.sp_y = self.y_pos
-            self.sp_z = self.z_pos
-            return
-
-    # Get next search waypoint
-        target_x, target_y, exceeded = self.cross_search.update(
-        self.x_pos,
-        self.y_pos)
-
-    # Search exhausted
-        if exceeded:
-            self.get_logger().error('[SEARCH] Max radius reached — HOLD.')
-            self.cross_search.reset()
-            self.tracking_mode = self.TRACK_HOLD
-            self.sp_x = self.x_pos
-            self.sp_y = self.y_pos
-            self.sp_z = self.z_pos
-            return
-
-    # Command waypoint directly
-        self.sp_x = float(target_x)
-        self.sp_y = float(target_y)
-
-    # Hold altitude during search
-        self.sp_z = self.cross_search.origin_z
-        dist_to_wp = math.sqrt((target_x - self.x_pos) ** 2 +(target_y - self.y_pos) ** 2)
-
+    def _enter_blind_descent(self):
+        self.sub_state   = self.SS_BLIND
+        self._blind_sp_x = self.sp_x
+        self._blind_sp_y = self.sp_y
         self.get_logger().warn(
-        f'[SEARCH] '
-        f'radius:{self.cross_search.radius_level} | '
-        f'wp({target_x:.2f}, {target_y:.2f}) | '
-        f'dist:{dist_to_wp:.2f}m | '
-        f'sp({self.sp_x:.2f}, '
-        f'{self.sp_y:.2f}, 'f'{self.sp_z:.2f})')
+            f'[BLIND_DESCENT] Freezing XY at '
+            f'({self._blind_sp_x:.2f}, {self._blind_sp_y:.2f}) | '
+            f'drone_z={self.z_pos:.2f}m')
+
+    def _update_blind_descent(self):
+        if self._blind_sp_x is not None:
+            self.sp_x = self._blind_sp_x
+            self.sp_y = self._blind_sp_y
+        self.sp_z = max(0.0, self.sp_z - self.BLIND_DESCENT_RATE)
+
+    # ================================================================== #
+    # MARKER LOST - COASTING / SEARCHING                                  #
+    # ================================================================== #
+
+    def _on_marker_lost(self):
+        if self._marker_visible:
+            self._marker_visible = False
+            self._stab_frames    = 0
+            lx = self.last_marker_global_x if self.last_marker_global_x is not None else 0.0
+            ly = self.last_marker_global_y if self.last_marker_global_y is not None else 0.0
+            self.get_logger().warn(
+                f'[LOST] Marker lost! Coasting to pos({lx:.2f},{ly:.2f})')
+
+        # Already very close — keep descending blind
+        if self.sub_state == self.SS_BLIND:
+            return
+
+        # NEW LOGIC: If we are already searching, DO NOT snap back to coasting!
+        if self.sub_state == self.SS_SEARCHING:
+            sp_x, sp_y, exhausted = self.search.update(self.x_pos, self.y_pos)
+            if exhausted:
+                self.get_logger().error('[SEARCHING] Exhausted — holding position.')
+            self.sp_x = float(sp_x)
+            self.sp_y = float(sp_y)
+            return
+
+        # Coasting logic to last known position
+        if self.last_marker_global_x is not None and self.last_marker_global_y is not None:
+            dist_to_last = math.sqrt((self.x_pos - self.last_marker_global_x)**2 + (self.y_pos - self.last_marker_global_y)**2)
+            
+            # If we reached the spot and STILL don't see it, trigger expanding search
+            if dist_to_last < 0.3:
+                self.sub_state = self.SS_SEARCHING
+                self.search.start(self.x_pos, self.y_pos, self.z_pos)
+                
+                sp_x, sp_y, _ = self.search.update(self.x_pos, self.y_pos)
+                self.sp_x = float(sp_x)
+                self.sp_y = float(sp_y)
+            else:
+                # Smoothly glide to the last known position (clamped to prevent pitching)
+                P_gain = 0.6
+                target_x = self.x_pos + P_gain * (self.last_marker_global_x - self.x_pos)
+                target_y = self.y_pos + P_gain * (self.last_marker_global_y - self.y_pos)
+                
+                self.sp_x = float(np.clip(target_x, self.x_pos - self.MAX_SP_DIST_XY, self.x_pos + self.MAX_SP_DIST_XY))
+                self.sp_y = float(np.clip(target_y, self.y_pos - self.MAX_SP_DIST_XY, self.y_pos + self.MAX_SP_DIST_XY))
+        
+        # Fallback if marker was never seen
+        else:
+            self.sub_state = self.SS_SEARCHING
+            self.search.start(self.x_pos, self.y_pos, self.z_pos)
+
+            sp_x, sp_y, exhausted = self.search.update(self.x_pos, self.y_pos)
+            if exhausted:
+                self.get_logger().error('[SEARCHING] Exhausted — holding position.')
+            self.sp_x = float(sp_x)
+            self.sp_y = float(sp_y)
+
+    # ================================================================== #
+    # SETPOINT PUBLISHER                                                  #
+    # ================================================================== #
+
     def _publish_setpoint(self):
         if self.stage < 4:
             return
         msg = PoseStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.stamp    = self.get_clock().now().to_msg()
         msg.header.frame_id = 'map'
-
         msg.pose.position.x = self.sp_x
         msg.pose.position.y = self.sp_y
         msg.pose.position.z = self.sp_z
-
         msg.pose.orientation.w = 1.0
-
         self.pos_pub.publish(msg)
 
     # ================================================================== #
@@ -523,86 +471,74 @@ class TakeoffPIDLand(Node):
     # ================================================================== #
 
     def control_loop(self):
-
         if not self.state.connected:
             return
 
-        # Stage 0: GUIDED mode
         if self.stage == 0:
             if self.state.mode != 'GUIDED':
-                req = SetMode.Request()
-                req.custom_mode = 'GUIDED'
+                req = SetMode.Request(); req.custom_mode = 'GUIDED'
                 self.mode_client.call_async(req)
             else:
                 self.stage = 1
 
-        # Stage 1: Arm
         elif self.stage == 1:
             if not self.state.armed:
-                req = CommandBool.Request()
-                req.value = True
+                req = CommandBool.Request(); req.value = True
                 self.arming_client.call_async(req)
             else:
                 self.stage = 2
 
-        # Stage 2: Takeoff
         elif self.stage == 2:
-            req          = CommandTOL.Request()
-            req.altitude = 10.0
+            req = CommandTOL.Request(); req.altitude = 10.0
             self.takeoff_client.call_async(req)
-            self.stage   = 3
+            self.stage = 3
             self.get_logger().info('Takeoff command sent.')
 
-        # Stage 3: Wait for altitude
         elif self.stage == 3:
             if self.z_pos >= 2.5:
                 self.sp_x = self.x_pos
                 self.sp_y = self.y_pos
                 self.sp_z = self.z_pos
                 self.stage = 4
-                self.get_logger().info(
-                    f'Altitude reached ({self.z_pos:.2f}m).')
+                self.get_logger().info(f'Altitude reached ({self.z_pos:.2f}m).')
 
-        # Stage 4: Transition to landing
         elif self.stage == 4:
             self.stage = 5
+            self.search.start(self.x_pos, self.y_pos, self.z_pos)
             self.get_logger().info('Landing stage started.')
 
-        # Stage 5: ArUco PID landing
         elif self.stage == 5:
+            if self.sub_state == self.SS_BLIND:
+                self._update_blind_descent()
 
-            status_map = {
-                self.TRACK_ARUCO:  'ARUCO',
-                self.TRACK_SEARCH: 'SEARCH',
-                self.TRACK_HOLD:   'HOLD',
-            }
-            self.get_logger().info(
-                f'[{status_map[self.tracking_mode]}] '
-                f'pos({self.x_pos:.2f}, {self.y_pos:.2f}, {self.z_pos:.2f}) | '
-                f'sp({self.sp_x:.2f}, {self.sp_y:.2f}, {self.sp_z:.2f})'
-            )
+            # Normal land: centred on marker at or below 3m altitude
+            lateral_error = math.sqrt(self._last_tvec[0]**2 + self._last_tvec[1]**2) if self._last_tvec is not None else 99.0
+            
+            normal_land = (
+                self._marker_visible
+                and self.sub_state == self.SS_TRACKING
+                and self._last_tvec is not None
+                and lateral_error < self.LANDING_DEADBAND
+                and self._last_tvec[2] <= (self.LANDING_ALTITUDE + 0.2))
 
-            # Trigger landing when centred at correct altitude
-            if (self._marker_visible
-                    and self._last_tvec is not None
-                    and abs(self._last_tvec[0]) < self.LANDING_DEADBAND
-                    and abs(self._last_tvec[1]) < self.LANDING_DEADBAND
-                    and abs(self._last_tvec[2] - self.LANDING_ALTITUDE)
-                        < self.LANDING_DEADBAND):
-                self.get_logger().info('Centred — switching to LAND mode.')
+            # Blind land: sp_z has reached floor
+            blind_land = (
+                self.sub_state == self.SS_BLIND
+                and self.sp_z <= self.LANDING_ALTITUDE)
+
+            if normal_land or blind_land:
+                reason = 'centred on marker' if normal_land else 'blind descent complete'
+                self.get_logger().info(f'Triggering LAND — {reason}.')
                 self.stage = 6
 
-        # Stage 6: LAND
         elif self.stage == 6:
             if self.state.mode != 'LAND':
-                req = SetMode.Request()
-                req.custom_mode = 'LAND'
+                req = SetMode.Request(); req.custom_mode = 'LAND'
                 self.mode_client.call_async(req)
                 self.get_logger().info('LAND mode commanded.')
             else:
                 self.get_logger().info('LAND mode active.')
-                self.timer.cancel()
-                self.sp_timer.cancel()
+                self.timer.cancel(); self.sp_timer.cancel()
 
 
 # =========================================================================== #
@@ -615,7 +551,6 @@ def main(args=None):
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()
