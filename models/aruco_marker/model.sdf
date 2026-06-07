@@ -15,7 +15,7 @@
     <visual name="base">
       <geometry>
         <box>
-          <size>2 2 0.02</size>
+          <size>1 1 0.02</size>
         </box>
       </geometry>
     </visual>
