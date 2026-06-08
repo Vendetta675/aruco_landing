@@ -15,12 +15,12 @@ tvec[2]  cam_z  depth     =  altitude above marker  (scales with marker_size)
 Stage-5 sub-states
 ------------------
 SEARCHING    Gentle expanding-square drift (rate-limited, no jerks).
-             Altitude held constant.
+Altitude held constant.
 STABILISING  Marker just appeared — hold position, wait N clean frames
-             before starting descent (prevents jerk on noisy first frame).
+before starting descent (prevents jerk on noisy first frame).
 TRACKING     Calculates global marker position with YAW COMPENSATION, coasts toward it, descends once lateral < threshold.
 BLIND_DESCENT cam_z < BLIND_ALT_THRESHOLD — last good XY frozen,
-             descend straight down.
+descend straight down.
 """
 
 import rclpy
@@ -193,7 +193,9 @@ class TakeoffPIDLand(Node):
         self.last_marker_global_x = None
         self.last_marker_global_y = None
         self.yaw                  = 0.0  # Added for coordinate rotation
-
+        
+        self.current_q            = None  # Add this
+        self.locked_q             = None  # Add this
         self.validator = TvecValidator()
         self.search    = GentleExpandingSearch()
 
@@ -202,7 +204,7 @@ class TakeoffPIDLand(Node):
             history=HistoryPolicy.KEEP_LAST, depth=10)
 
         self.bridge = CvBridge()
-
+        
         # OpenCV ArUco — DICT_4X4_50, marker ID 0
         self.aruco_dict     = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
         self.aruco_params   = cv2.aruco.DetectorParameters()
@@ -250,7 +252,7 @@ class TakeoffPIDLand(Node):
         self.x_pos = msg.pose.position.x
         self.y_pos = msg.pose.position.y
         self.z_pos = msg.pose.position.z
-        
+        self.current_q = msg.pose.orientation # Store current orientation for potential future use
         # Convert MAVROS quaternion to Euler Yaw (radians)
         q = msg.pose.orientation
         siny_cosp = 2 * (q.w * q.z + q.x * q.y)
@@ -338,8 +340,8 @@ class TakeoffPIDLand(Node):
 
         # 1. Map camera frame to Drone Body frame (Forward-Left-Up)
         # Standard nadir camera: top of image (-cam_y) is forward, right (+cam_x) is right
-        body_forward = cam_y
-        body_left    = -cam_x  # left is opposite of right
+        body_forward = -cam_y
+        body_left    = cam_x  # left is opposite of right
 
         # 2. Rotate body frame error to Global ENU map frame using drone's yaw
         # This completely negates spiraling/drifting no matter the drone's heading.
@@ -353,9 +355,9 @@ class TakeoffPIDLand(Node):
         self.last_marker_global_y = marker_global_y
 
         # 3. SMOOTHLY MOVE SETPOINT TOWARDS MARKER
-        P_gain = 0.4 
-        target_x = self.x_pos + P_gain * (marker_global_x + self.x_pos)
-        target_y = self.y_pos + P_gain * (marker_global_y + self.y_pos)
+        P_gain = 0.6 
+        target_x = self.x_pos + P_gain * (global_err_x)
+        target_y = self.y_pos + P_gain * (global_err_y)
 
         # CLAMP THE SETPOINT: Prevents aggressive pitch and camera FOV loss
         self.sp_x = float(np.clip(target_x, self.x_pos - self.MAX_SP_DIST_XY, self.x_pos + self.MAX_SP_DIST_XY))
@@ -464,8 +466,11 @@ class TakeoffPIDLand(Node):
         msg.pose.position.y = self.sp_y
         msg.pose.position.z = self.sp_z
         msg.pose.orientation.w = 1.0
+        if self.locked_q is not None:
+            msg.pose.orientation = self.locked_q
+        else:
+            msg.pose.orientation.w = 1.0
         self.pos_pub.publish(msg)
-
     # ================================================================== #
     # CONTROL LOOP                                                        #
     # ================================================================== #
@@ -499,6 +504,7 @@ class TakeoffPIDLand(Node):
                 self.sp_x = self.x_pos
                 self.sp_y = self.y_pos
                 self.sp_z = self.z_pos
+                self.locked_q = self.current_q # Lock the current orientation for potential future use
                 self.stage = 4
                 self.get_logger().info(f'Altitude reached ({self.z_pos:.2f}m).')
 
