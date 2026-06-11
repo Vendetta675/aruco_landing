@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-ArUco Precision-Landing Node  —  tuned for 2 m × 2 m marker
+ArUco Precision-Landing Node  —  tuned for 0.7 m × 0.7 m marker
 =============================================================
 
 All parameters are calibrated for:
-- ArUco DICT_4X4_50, marker ID 0, physical size 2.0 m × 2.0 m
+- ArUco DICT_4X4_50, marker ID 0, physical size 0.7 m × 0.7 m
 - Downward-facing gimbal camera, 640×480, fx=fy≈205.5
 
 tvec convention (estimatePoseSingleMarkers, nadir camera):
@@ -44,7 +44,7 @@ import math
 
 class TvecValidator:
     """Rejects physically implausible tvec readings."""
-    MAX_LATERAL_M = 30.0   # 2 m marker → errors up to ~15 m are valid
+    MAX_LATERAL_M = 10.0   # 0.7 m marker → errors up to ~5 m are valid
     MAX_CAM_Z_M   = 40.0
     MAX_JUMP_M    = 8.0    # max frame-to-frame change
 
@@ -149,26 +149,25 @@ class TakeoffPIDLand(Node):
     SS_BLIND       = 'BLIND_DESCENT'
 
     # ── MARKER ────────────────────────────────────────────────────────────
-    MARKER_SIZE = 2.0           # metres
+    MARKER_SIZE = 0.7           # metres
 
     # ── LANDING GEOMETRY ──────────────────────────────────────────────────
-    LANDING_ALTITUDE    = 1.0   # m above marker → trigger LAND mode
-    LANDING_DEADBAND    = 0.50  # m lateral tolerance for LAND
+    LANDING_ALTITUDE    = 0.01  # m above marker → trigger LAND mode
+    LANDING_DEADBAND    = 0.02  # m lateral tolerance for LAND
 
     # ── BLIND DESCENT ─────────────────────────────────────────────────────
-    BLIND_ALT_THRESHOLD = 1.0   # m
+    BLIND_ALT_THRESHOLD = 0.5   # m
     BLIND_DESCENT_RATE  = 0.03  # m lowered per control cycle
 
     # ── SETPOINT CLAMPS ───────────────────────────────────────────────────
-    MAX_SP_DIST_XY = 1.0        # m — max setpoint offset from current pos XY
+    MAX_SP_DIST_XY = 0.7       # m — max setpoint offset from current pos XY
     MAX_SP_DIST_Z  = 0.6        # m — max setpoint offset from current pos Z
-
     # ── DETECTION ─────────────────────────────────────────────────────────
-    LOST_FRAME_THRESHOLD = 6    # consecutive missed frames → SEARCHING
-    STABILISE_FRAMES     = 8    # consecutive valid frames → leave STABILISING
+    LOST_FRAME_THRESHOLD = 8    # consecutive missed frames → SEARCHING
+    STABILISE_FRAMES     = 6    # consecutive valid frames → leave STABILISING
 
     # ── DESCENT GATE ──────────────────────────────────────────────────────
-    CENTRE_THRESHOLD = 0.60     # m in cam frame
+    CENTRE_THRESHOLD = 0.01   # m in cam frame
     DESCENT_STEP_M   = 0.02     # m per control cycle — gradual, not aggressive
 
     def __init__(self):
@@ -205,7 +204,7 @@ class TakeoffPIDLand(Node):
 
         self.bridge = CvBridge()
         
-        # OpenCV ArUco — DICT_4X4_50, marker ID 0
+        # OpenCV ArUco — DICT_4X4_50, marker ID 10
         self.aruco_dict     = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
         self.aruco_params   = cv2.aruco.DetectorParameters()
         self.aruco_detector = cv2.aruco.ArucoDetector(
@@ -244,7 +243,15 @@ class TakeoffPIDLand(Node):
     # ================================================================== #
     # CALLBACKS                                                           #
     # ================================================================== #
-
+    def _quat_to_matrix(self, q):
+        """Converts a geometry_msgs/Quaternion to a 3x3 rotation matrix using pure NumPy."""
+        x, y, z, w = q.x, q.y, q.z, q.w
+        return np.array([
+            [1 - 2*(y**2 + z**2),     2*(x*y - w*z),       2*(x*z + w*y)],
+            [2*(x*y + w*z),           1 - 2*(x**2 + z**2), 2*(y*z - w*x)],
+            [2*(x*z - w*y),           2*(y*z + w*x),       1 - 2*(x**2 + y**2)]
+        ])
+    
     def state_cb(self, msg):
         self.state = msg
 
@@ -332,21 +339,27 @@ class TakeoffPIDLand(Node):
         cam_x = float(tvec[0])
         cam_y = float(tvec[1])
         cam_z = float(tvec[2])
-        lateral = math.sqrt(cam_x**2 + cam_y**2)
 
         if cam_z < self.BLIND_ALT_THRESHOLD:
             self._enter_blind_descent()
             return
 
-        # 1. Map camera frame to Drone Body frame (Forward-Left-Up)
-        # Standard nadir camera: top of image (-cam_y) is forward, right (+cam_x) is right
-        body_forward = -cam_y
-        body_left    = cam_x  # left is opposite of right
+        # 1. Map camera frame to Drone Body frame (FLU)
+        # Standard nadir camera: top of image (-cam_y) is forward, right (+cam_x) is right.
+        # We pad this to a 4D vector to allow for 4x4 matrix multiplication.
+        v_body = np.array([-cam_y, -cam_x, -cam_z])
 
-        # 2. Rotate body frame error to Global ENU map frame using drone's yaw
-        # This completely negates spiraling/drifting no matter the drone's heading.
-        global_err_x = (body_forward * math.cos(self.yaw)) - (body_left * math.sin(self.yaw))
-        global_err_y = (body_forward * math.sin(self.yaw)) + (body_left * math.cos(self.yaw))
+        # 2. Rotate body frame vector to Global ENU map frame using full drone orientation
+        # This completely negates spiraling and drifting by mathematically canceling out Pitch and Roll.
+        q = self.current_q
+        q_array = [q.x, q.y, q.z, q.w]
+        rot_matrix = self._quat_to_matrix(self.current_q)
+        v_enu = np.dot(rot_matrix, v_body)
+        
+
+        # Extract the true horizontal errors relative to the ground
+        global_err_x = v_enu[0]
+        global_err_y = v_enu[1]
 
         marker_global_x = self.x_pos + global_err_x
         marker_global_y = self.y_pos + global_err_y
@@ -355,16 +368,18 @@ class TakeoffPIDLand(Node):
         self.last_marker_global_y = marker_global_y
 
         # 3. SMOOTHLY MOVE SETPOINT TOWARDS MARKER
-        P_gain = 0.6 
-        target_x = self.x_pos + P_gain * (global_err_x)
-        target_y = self.y_pos + P_gain * (global_err_y)
+        P_gain = 0.8 
+        target_x = self.x_pos + P_gain * global_err_x
+        target_y = self.y_pos + P_gain * global_err_y
 
         # CLAMP THE SETPOINT: Prevents aggressive pitch and camera FOV loss
         self.sp_x = float(np.clip(target_x, self.x_pos - self.MAX_SP_DIST_XY, self.x_pos + self.MAX_SP_DIST_XY))
         self.sp_y = float(np.clip(target_y, self.y_pos - self.MAX_SP_DIST_XY, self.y_pos + self.MAX_SP_DIST_XY))
 
-        # Altitude: only descend once centred
-        if lateral < self.CENTRE_THRESHOLD:
+        # 4. Altitude: calculate true lateral ground error instead of raw camera error
+        true_lateral_error = math.sqrt(global_err_x**2 + global_err_y**2)
+        
+        if true_lateral_error < self.CENTRE_THRESHOLD:
             self.sp_z = float(np.clip(
                 self.sp_z - self.DESCENT_STEP_M,
                 self.z_pos - self.MAX_SP_DIST_Z,
@@ -372,7 +387,7 @@ class TakeoffPIDLand(Node):
 
         self.get_logger().info(
             f'[TRACKING] '
-            f'lat:{lateral:.3f}m | yaw:{math.degrees(self.yaw):.1f}° | '
+            f'true_lat_err:{true_lateral_error:.3f}m | '
             f'sp({self.sp_x:.2f},{self.sp_y:.2f},{self.sp_z:.2f})')
 
     # ================================================================== #
@@ -494,7 +509,7 @@ class TakeoffPIDLand(Node):
                 self.stage = 2
 
         elif self.stage == 2:
-            req = CommandTOL.Request(); req.altitude = 10.0
+            req = CommandTOL.Request(); req.altitude = 3.0
             self.takeoff_client.call_async(req)
             self.stage = 3
             self.get_logger().info('Takeoff command sent.')
