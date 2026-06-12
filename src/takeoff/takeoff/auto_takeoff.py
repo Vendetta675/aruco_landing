@@ -156,7 +156,7 @@ class TakeoffPIDLand(Node):
     LANDING_DEADBAND    = 0.01  # m lateral tolerance for LAND
 
     # ── BLIND DESCENT ─────────────────────────────────────────────────────
-    BLIND_ALT_THRESHOLD = 0.8   # It ascends above this → tracking, descends below this → BLIND_DESCENT
+    BLIND_ALT_THRESHOLD = 0.75   # It ascends above this → tracking, descends below this → BLIND_DESCENT
     BLIND_DESCENT_RATE  = 0.03  # m lowered per control cycle
 
     # ── SETPOINT CLAMPS ───────────────────────────────────────────────────
@@ -211,7 +211,7 @@ class TakeoffPIDLand(Node):
             self.aruco_dict, self.aruco_params)
 
         self.camera_matrix = np.array([
-            [ 554.3827128226441 , 0.0,               320.0],
+            [554.3827128226441 , 0.0,               320.0],
             [0.0,                554.3827128226441 , 240.0],
             [0.0,               0.0,                 1.0],
         ], dtype=np.float64)
