@@ -78,7 +78,7 @@ class GentleExpandingSearch:
     Setpoint changes are rate-limited → smooth drift, never jerky.
     Altitude held constant throughout.
     """
-    SEARCH_STEP = 1.0   # m — square expands by this each revolution
+    SEARCH_STEP = 0.5   # m — square expands by this each revolution
     MAX_RADIUS  = 10.0   # m — give up beyond this
     WP_RADIUS   = 0.4    # m — waypoint acceptance radius
     WP_TIMEOUT  = 15.0   # s — hard per-waypoint time limit
@@ -152,19 +152,19 @@ class TakeoffPIDLand(Node):
     MARKER_SIZE = 0.7           # metres
 
     # ── LANDING GEOMETRY ──────────────────────────────────────────────────
-    LANDING_ALTITUDE    = 0.01  # m above marker → trigger LAND mode
-    LANDING_DEADBAND    = 0.02  # m lateral tolerance for LAND
+    LANDING_ALTITUDE    = 0.7  # m above marker → trigger LAND mode
+    LANDING_DEADBAND    = 0.01  # m lateral tolerance for LAND
 
     # ── BLIND DESCENT ─────────────────────────────────────────────────────
-    BLIND_ALT_THRESHOLD = 0.5   # m
+    BLIND_ALT_THRESHOLD = 0.75   # It ascends above this → tracking, descends below this → BLIND_DESCENT
     BLIND_DESCENT_RATE  = 0.03  # m lowered per control cycle
 
     # ── SETPOINT CLAMPS ───────────────────────────────────────────────────
     MAX_SP_DIST_XY = 0.5       # m — max setpoint offset from current pos XY
     MAX_SP_DIST_Z  = 0.3        # m — max setpoint offset from current pos Z
     # ── DETECTION ─────────────────────────────────────────────────────────
-    LOST_FRAME_THRESHOLD = 8    # consecutive missed frames → SEARCHING
-    STABILISE_FRAMES     = 6    # consecutive valid frames → leave STABILISING
+    LOST_FRAME_THRESHOLD = 6    # consecutive missed frames → SEARCHING
+    STABILISE_FRAMES     = 9    # consecutive valid frames → leave STABILISING
 
     # ── DESCENT GATE ──────────────────────────────────────────────────────
     CENTRE_THRESHOLD = 0.01   # m in cam frame
@@ -204,15 +204,15 @@ class TakeoffPIDLand(Node):
 
         self.bridge = CvBridge()
         
-        # OpenCV ArUco — DICT_4X4_50, marker ID 10
+        # OpenCV ArUco — DICT_4X4_50, marker ID 0-50, 0.7 m size
         self.aruco_dict     = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
         self.aruco_params   = cv2.aruco.DetectorParameters()
         self.aruco_detector = cv2.aruco.ArucoDetector(
             self.aruco_dict, self.aruco_params)
 
         self.camera_matrix = np.array([
-            [205.4696273803711, 0.0,               320.0],
-            [0.0,               205.4696559906006, 240.0],
+            [554.3827128226441 , 0.0,               320.0],
+            [0.0,                554.3827128226441 , 240.0],
             [0.0,               0.0,                 1.0],
         ], dtype=np.float64)
         self.dist_coeffs = np.zeros((5, 1), dtype=np.float64)
@@ -449,7 +449,7 @@ class TakeoffPIDLand(Node):
                 self.sp_y = float(sp_y)
             else:
                 # Smoothly glide to the last known position (clamped to prevent pitching)
-                P_gain = 0.6
+                P_gain = 0.5
                 target_x = self.x_pos + P_gain * (self.last_marker_global_x - self.x_pos)
                 target_y = self.y_pos + P_gain * (self.last_marker_global_y - self.y_pos)
                 
