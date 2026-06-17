@@ -1,0 +1,5 @@
+[0.000000] (-) TimerEvent: {}
+[0.000634] (takeoff) JobQueued: {'identifier': 'takeoff', 'dependencies': OrderedDict()}
+[0.001160] (takeoff) JobStarted: {'identifier': 'takeoff'}
+[0.014699] (takeoff) JobEnded: {'identifier': 'takeoff', 'rc': 1}
+[0.025294] (-) EventReactorShutdown: {}

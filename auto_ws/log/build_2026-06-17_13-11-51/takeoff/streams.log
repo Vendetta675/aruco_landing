@@ -1,0 +1,21 @@
+[1.473s] Invoking command in '/home/ayaankushwah/aruco_landing/auto_ws/src/takeoff': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PS1=\[\e]0;\u@\h: \w\a\]${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ PYTHONPATH=/home/ayaankushwah/aruco_landing/auto_ws/build/takeoff/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/ayaankushwah/aruco_landing/auto_ws/install/takeoff/lib/python3.12/site-packages:${PYTHONPATH} VIRTUAL_ENV_PROMPT=(venv-ardupilot) /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/takeoff build --build-base /home/ayaankushwah/aruco_landing/auto_ws/build/takeoff/build install --record /home/ayaankushwah/aruco_landing/auto_ws/build/takeoff/install.log --single-version-externally-managed
+[1.938s] running egg_info
+[1.973s] writing ../../build/takeoff/takeoff.egg-info/PKG-INFO
+[1.974s] writing dependency_links to ../../build/takeoff/takeoff.egg-info/dependency_links.txt
+[1.974s] writing entry points to ../../build/takeoff/takeoff.egg-info/entry_points.txt
+[1.974s] writing requirements to ../../build/takeoff/takeoff.egg-info/requires.txt
+[1.975s] writing top-level names to ../../build/takeoff/takeoff.egg-info/top_level.txt
+[2.047s] reading manifest file '../../build/takeoff/takeoff.egg-info/SOURCES.txt'
+[2.047s] adding license file 'LICENSE'
+[2.049s] writing manifest file '../../build/takeoff/takeoff.egg-info/SOURCES.txt'
+[2.049s] running build
+[2.049s] running build_py
+[2.049s] running install
+[2.061s] running install_lib
+[2.096s] running install_egg_info
+[2.133s] removing '/home/ayaankushwah/aruco_landing/auto_ws/install/takeoff/lib/python3.12/site-packages/takeoff-0.0.0-py3.12.egg-info' (and everything under it)
+[2.134s] Copying ../../build/takeoff/takeoff.egg-info to /home/ayaankushwah/aruco_landing/auto_ws/install/takeoff/lib/python3.12/site-packages/takeoff-0.0.0-py3.12.egg-info
+[2.135s] running install_scripts
+[2.388s] Installing auto_takeoff script to /home/ayaankushwah/aruco_landing/auto_ws/install/takeoff/lib/takeoff
+[2.388s] writing list of installed files to '/home/ayaankushwah/aruco_landing/auto_ws/build/takeoff/install.log'
+[2.436s] Invoked command in '/home/ayaankushwah/aruco_landing/auto_ws/src/takeoff' returned '0': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PS1=\[\e]0;\u@\h: \w\a\]${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ PYTHONPATH=/home/ayaankushwah/aruco_landing/auto_ws/build/takeoff/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/ayaankushwah/aruco_landing/auto_ws/install/takeoff/lib/python3.12/site-packages:${PYTHONPATH} VIRTUAL_ENV_PROMPT=(venv-ardupilot) /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/takeoff build --build-base /home/ayaankushwah/aruco_landing/auto_ws/build/takeoff/build install --record /home/ayaankushwah/aruco_landing/auto_ws/build/takeoff/install.log --single-version-externally-managed

@@ -1,0 +1,21 @@
+[1.227s] Invoking command in '/workspace/src/takeoff': PYTHONPATH=/workspace/build/takeoff/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/workspace/install/takeoff/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/takeoff build --build-base /workspace/build/takeoff/build install --record /workspace/build/takeoff/install.log --single-version-externally-managed
+[1.605s] running egg_info
+[1.628s] writing ../../build/takeoff/takeoff.egg-info/PKG-INFO
+[1.628s] writing dependency_links to ../../build/takeoff/takeoff.egg-info/dependency_links.txt
+[1.628s] writing entry points to ../../build/takeoff/takeoff.egg-info/entry_points.txt
+[1.629s] writing requirements to ../../build/takeoff/takeoff.egg-info/requires.txt
+[1.629s] writing top-level names to ../../build/takeoff/takeoff.egg-info/top_level.txt
+[1.676s] reading manifest file '../../build/takeoff/takeoff.egg-info/SOURCES.txt'
+[1.677s] adding license file 'LICENSE'
+[1.678s] writing manifest file '../../build/takeoff/takeoff.egg-info/SOURCES.txt'
+[1.678s] running build
+[1.678s] running build_py
+[1.679s] running install
+[1.691s] running install_lib
+[1.716s] running install_egg_info
+[1.742s] removing '/workspace/install/takeoff/lib/python3.12/site-packages/takeoff-0.0.0-py3.12.egg-info' (and everything under it)
+[1.743s] Copying ../../build/takeoff/takeoff.egg-info to /workspace/install/takeoff/lib/python3.12/site-packages/takeoff-0.0.0-py3.12.egg-info
+[1.744s] running install_scripts
+[1.920s] Installing auto_takeoff script to /workspace/install/takeoff/lib/takeoff
+[1.921s] writing list of installed files to '/workspace/build/takeoff/install.log'
+[1.970s] Invoked command in '/workspace/src/takeoff' returned '0': PYTHONPATH=/workspace/build/takeoff/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/workspace/install/takeoff/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/takeoff build --build-base /workspace/build/takeoff/build install --record /workspace/build/takeoff/install.log --single-version-externally-managed
