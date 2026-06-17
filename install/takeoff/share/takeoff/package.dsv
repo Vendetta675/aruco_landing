@@ -1,0 +1,3 @@
+source;share/takeoff/hook/pythonpath.ps1
+source;share/takeoff/hook/pythonpath.dsv
+source;share/takeoff/hook/pythonpath.sh
