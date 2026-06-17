@@ -1,3 +1,6 @@
 auto_ws/install/
 auto_ws/build/
 auto_ws/log/
+build/
+install/
+log/
