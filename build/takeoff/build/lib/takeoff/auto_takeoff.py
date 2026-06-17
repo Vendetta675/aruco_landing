@@ -152,7 +152,7 @@ class TakeoffPIDLand(Node):
     MARKER_SIZE = 0.7           # metres
 
     # ── LANDING GEOMETRY ──────────────────────────────────────────────────
-    LANDING_ALTITUDE    = 0.5  # m above marker → trigger LAND mode
+    LANDING_ALTITUDE    = 0.7  # m above marker → trigger LAND mode
     LANDING_DEADBAND    = 0.01  # m lateral tolerance for LAND
 
     # ── BLIND DESCENT ─────────────────────────────────────────────────────
@@ -210,24 +210,19 @@ class TakeoffPIDLand(Node):
         self.aruco_detector = cv2.aruco.ArucoDetector(
             self.aruco_dict, self.aruco_params)
 
-        # Updated Camera Matrix (K)
         self.camera_matrix = np.array([
-            [1238.69507, 0.0,        676.256475],
-            [0.0,        1240.10018, 280.049937],
-            [0.0,        0.0,        1.0]
+            [554.3827128226441 , 0.0,               320.0],
+            [0.0,                554.3827128226441 , 240.0],
+            [0.0,               0.0,                 1.0],
         ], dtype=np.float64)
-
-        # Updated Distortion Coefficients (D)
-        self.dist_coeffs = np.array([
-            [0.09212235, -0.36553366, -0.01661773, 0.010594, 0.21629396]
-        ], dtype=np.float64)
+        self.dist_coeffs = np.zeros((5, 1), dtype=np.float64)
 
         self.create_subscription(State,
             '/mavros/state', self.state_cb, 10)
         self.create_subscription(PoseStamped,
             '/mavros/local_position/pose', self.pos_cb, qos)
         self.create_subscription(Image,
-            '/camera/image_raw', self.image_callback, 10)
+            '/camera_image', self.image_callback, 10)
 
         self.pos_pub = self.create_publisher(
             PoseStamped, '/mavros/setpoint_position/local', 10)
@@ -514,7 +509,7 @@ class TakeoffPIDLand(Node):
                 self.stage = 2
 
         elif self.stage == 2:
-            req = CommandTOL.Request(); req.altitude = 1.5
+            req = CommandTOL.Request(); req.altitude = 3.0
             self.takeoff_client.call_async(req)
             self.stage = 3
             self.get_logger().info('Takeoff command sent.')
